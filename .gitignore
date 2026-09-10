@@ -1,0 +1,30 @@
+# Generated datasets -- rebuild with `make data`. The full slice alone is ~500MB.
+data/raw/demo/
+data/raw/full/
+data/raw/neo4j/
+data/raw/novacrest_customers.json
+data/raw/novacrest_customers_array.json
+
+# Pipeline outputs -- rebuild with `make offline` or the Spark jobs
+exports/*.csv
+exports/*.xlsx
+exports/*.parquet
+
+# Runtime
+logs/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Spark
+spark-warehouse/
+metastore_db/
+derby.log
+
+# OS and editor
+.DS_Store
+*.swp
+.idea/
+.vscode/

@@ -1,0 +1,25 @@
+# Host-side tooling: data generation, the Kafka producer, the Alteryx-substitute
+# blending layer, and the Streamlit dashboards.
+#
+# Spark jobs do NOT use this file -- they run inside finsight/spark:4.0.4 with
+# PySpark supplied by the image.
+
+# Data generation and blending
+numpy>=2.1
+pandas>=2.2
+pyarrow>=17.0
+openpyxl>=3.1          # Alteryx-substitute XLSX output (spec 9.1)
+
+# Kafka producer / dashboard consumer
+confluent-kafka>=2.5
+
+# Database clients
+pymongo>=4.8
+neo4j>=5.24
+
+# Dashboards (Power BI substitute)
+streamlit>=1.38
+plotly>=5.24
+
+# Hive access from the blending layer
+requests>=2.32

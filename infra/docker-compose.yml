@@ -1,0 +1,331 @@
+# FinSight platform stack.
+#
+# 16GB of host RAM will not hold every service at once, so each is tagged with a
+# profile. Bring up only what a given day needs:
+#
+#   docker compose --profile core --profile ingest up -d     # Day 1
+#   docker compose --profile core --profile compute up -d    # Day 2
+#   docker compose --profile warehouse --profile nosql up -d # Day 3
+#   docker compose --profile demo up -d                      # Day 5 (all)
+#
+# Every service also carries the "demo" profile so the last line works.
+
+name: finsight
+
+x-hadoop-env: &hadoop-env
+  HADOOP_CONF_DIR: /opt/hadoop/etc/hadoop
+
+services:
+
+  # ---------------------------------------------------------------- storage --
+
+  namenode:
+    build:
+      context: ./hadoop
+    image: finsight/hadoop:3.4.1
+    container_name: finsight-namenode
+    hostname: namenode
+    command: ["namenode"]
+    environment: *hadoop-env
+    ports:
+      - "9870:9870"   # NameNode web UI
+      - "8020:8020"   # HDFS RPC
+    volumes:
+      - namenode-data:/hadoop/dfs/name
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9870/ > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 40s
+    mem_limit: 900m
+    profiles: [core, demo]
+
+  datanode:
+    build:
+      context: ./hadoop
+    image: finsight/hadoop:3.4.1
+    container_name: finsight-datanode
+    hostname: datanode
+    command: ["datanode"]
+    environment: *hadoop-env
+    ports:
+      - "9864:9864"
+    volumes:
+      - datanode-data:/hadoop/dfs/data
+    depends_on:
+      namenode:
+        condition: service_healthy
+    mem_limit: 900m
+    profiles: [core, demo]
+
+  # One-shot: creates /finsight/... and the Hive warehouse root, then exits.
+  hdfs-bootstrap:
+    image: finsight/hadoop:3.4.1
+    container_name: finsight-hdfs-bootstrap
+    command: ["bootstrap"]
+    environment: *hadoop-env
+    depends_on:
+      namenode:
+        condition: service_healthy
+    restart: "no"
+    profiles: [core, demo]
+
+  # --------------------------------------------------------------- ingestion --
+
+  kafka:
+    image: apache/kafka:4.0.0
+    container_name: finsight-kafka
+    hostname: kafka
+    ports:
+      - "9092:9092"    # host clients (producer, dashboards)
+      - "29092:29092"  # in-network clients (Spark, Connect)
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: finsight-novacrest-cluster
+      KAFKA_HEAP_OPTS: "-Xmx768m -Xms256m"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:29092 > /dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    mem_limit: 1100m
+    profiles: [ingest, demo]
+
+  kafka-connect:
+    build:
+      context: .
+      dockerfile: connect/Dockerfile
+    image: finsight/kafka-connect:7.7.1
+    container_name: finsight-kafka-connect
+    hostname: kafka-connect
+    ports:
+      - "8083:8083"
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: kafka:29092
+      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
+      CONNECT_REST_PORT: 8083
+      CONNECT_GROUP_ID: finsight-connect
+      CONNECT_CONFIG_STORAGE_TOPIC: _connect-configs
+      CONNECT_OFFSET_STORAGE_TOPIC: _connect-offsets
+      CONNECT_STATUS_STORAGE_TOPIC: _connect-status
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      # ParquetFormat needs a typed record, so the producer wraps each payload
+      # in a Connect JSON schema envelope (see ingestion/kafka_producer.py).
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.storage.StringConverter
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "true"
+      CONNECT_PLUGIN_PATH: /usr/share/java,/usr/share/confluent-hub-components
+      CONNECT_LOG4J_ROOT_LOGLEVEL: WARN
+      KAFKA_HEAP_OPTS: "-Xmx768m -Xms256m"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      namenode:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/connectors > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 90s
+    mem_limit: 1200m
+    profiles: [ingest, demo]
+
+  # --------------------------------------------------------------- warehouse --
+
+  hive-postgres:
+    image: postgres:16-alpine
+    container_name: finsight-hive-postgres
+    hostname: hive-postgres
+    environment:
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive
+      POSTGRES_DB: metastore
+    volumes:
+      - hive-metastore-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    mem_limit: 300m
+    profiles: [warehouse, demo]
+
+  hive-metastore:
+    build:
+      context: .
+      dockerfile: hive/Dockerfile
+    image: finsight/hive:4.0.0
+    container_name: finsight-hive-metastore
+    hostname: hive-metastore
+    environment:
+      SERVICE_NAME: metastore
+      DB_DRIVER: postgres
+      HIVE_SERVER2_THRIFT_PORT: 10000
+    ports:
+      - "9083:9083"
+    depends_on:
+      hive-postgres:
+        condition: service_healthy
+      namenode:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'cat < /dev/null > /dev/tcp/localhost/9083'"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    mem_limit: 1000m
+    profiles: [warehouse, demo]
+
+  hiveserver2:
+    image: finsight/hive:4.0.0
+    container_name: finsight-hiveserver2
+    hostname: hiveserver2
+    environment:
+      SERVICE_NAME: hiveserver2
+      DB_DRIVER: postgres
+      IS_RESUME: "true"   # schema already initialised by the metastore service
+    ports:
+      - "10000:10000"
+      - "10002:10002"   # HiveServer2 web UI
+    depends_on:
+      hive-metastore:
+        condition: service_healthy
+    mem_limit: 900m
+    profiles: [warehouse, demo]
+
+  # ----------------------------------------------------------------- compute --
+
+  spark-master:
+    build:
+      context: .
+      dockerfile: spark/Dockerfile
+    image: finsight/spark:4.0.4
+    container_name: finsight-spark-master
+    hostname: spark-master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    ports:
+      - "7077:7077"
+      - "8080:8080"   # Spark master UI
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      SPARK_MASTER_HOST: spark-master
+    volumes:
+      - ../spark:/opt/finsight/spark:ro
+      - ../warehouse:/opt/finsight/warehouse:ro
+      - ../data:/opt/finsight/data
+      - ../exports:/opt/finsight/exports
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080 > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    mem_limit: 700m
+    profiles: [compute, demo]
+
+  spark-worker:
+    image: finsight/spark:4.0.4
+    container_name: finsight-spark-worker
+    hostname: spark-worker
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    ports:
+      - "8081:8081"
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      # Two concurrent streaming jobs plus a batch job need enough slots that
+      # none of them starve waiting for an executor.
+      SPARK_WORKER_CORES: "4"
+      SPARK_WORKER_MEMORY: "2g"
+    volumes:
+      - ../spark:/opt/finsight/spark:ro
+      - ../warehouse:/opt/finsight/warehouse:ro
+      - ../data:/opt/finsight/data
+      - ../exports:/opt/finsight/exports
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    mem_limit: 2800m
+    profiles: [compute, demo]
+
+  # ------------------------------------------------------------------- nosql --
+
+  mongodb:
+    image: mongo:8
+    container_name: finsight-mongodb
+    hostname: mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: finsight
+      MONGO_INITDB_ROOT_PASSWORD: finsight
+      MONGO_INITDB_DATABASE: novacrest
+    volumes:
+      - mongo-data:/data/db
+      - ../data/raw:/import:ro
+      - ../databases:/scripts:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.runCommand({ping:1}).ok' > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+    mem_limit: 700m
+    profiles: [nosql, demo]
+
+  neo4j:
+    image: neo4j:5.26-community
+    container_name: finsight-neo4j
+    hostname: neo4j
+    ports:
+      - "7474:7474"   # Neo4j Browser
+      - "7687:7687"   # Bolt
+    environment:
+      NEO4J_AUTH: neo4j/finsight123
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 768m
+      NEO4J_server_memory_pagecache__size: 384m
+      NEO4J_apoc_import_file_enabled: "true"
+    volumes:
+      - neo4j-data:/data
+      - ../data/raw/neo4j:/var/lib/neo4j/import:ro
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p finsight123 'RETURN 1' > /dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 40s
+    mem_limit: 1400m
+    profiles: [nosql, demo]
+
+volumes:
+  namenode-data:
+  datanode-data:
+  kafka-data:
+  hive-metastore-db:
+  mongo-data:
+  neo4j-data:
+
+networks:
+  default:
+    name: finsight-net

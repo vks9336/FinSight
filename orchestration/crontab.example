@@ -1,0 +1,41 @@
+# FinSight nightly batch schedule (spec 7.3: "scheduled to run nightly after
+# market close").
+#
+# Install with:  crontab orchestration/crontab.example
+# Inspect with:  crontab -l
+#
+# Adjust FINSIGHT_HOME to wherever the repository lives. cron runs with a
+# minimal environment and no shell profile, so PATH has to be set explicitly or
+# the docker binary will not be found.
+
+SHELL=/bin/bash
+PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin
+FINSIGHT_HOME=/Users/vishalkumarsingh/Desktop/Project
+MAILTO=""
+
+# 22:00 -- composite risk scoring over the rolling 7-day window (spec 7.3).
+# Runs first because the summary mart refresh below depends on its output.
+0 22 * * * cd $FINSIGHT_HOME && make batch-risk >> logs/batch_risk.log 2>&1
+
+# 22:30 -- customer lifetime value (spec 7.4). Deliberately a separate
+# invocation with its own SparkSession, not chained into the job above.
+30 22 * * * cd $FINSIGHT_HOME && make batch-clv >> logs/batch_clv.log 2>&1
+
+# 23:00 -- refresh the Hive summary mart from the night's landed data, then
+# recompute column statistics so the next day's queries plan correctly.
+0 23 * * * cd $FINSIGHT_HOME && bash warehouse/apply.sh hive_summary_mart.sql >> logs/hive_mart.log 2>&1
+
+# 23:30 -- compliance, customer fraud and dormancy reports (specs 7.5, 7.6).
+30 23 * * * cd $FINSIGHT_HOME && make sql-all >> logs/spark_sql.log 2>&1
+
+# 00:15 -- rebuild the blending outputs the dashboards read.
+15 0 * * * cd $FINSIGHT_HOME && make blend >> logs/blend.log 2>&1
+
+# 00:30 -- assert every published KPI still holds. A non-zero exit means a
+# metric moved overnight; with MAILTO set, cron mails the failure.
+30 0 * * * cd $FINSIGHT_HOME && make verify >> logs/verify.log 2>&1
+
+# Sundays 02:00 -- prune streaming checkpoints older than 30 days. Structured
+# Streaming never removes these itself and they grow without bound.
+0 2 * * 0 cd $FINSIGHT_HOME && docker exec finsight-namenode \
+  hdfs dfs -rm -r -skipTrash '/finsight/checkpoints/*/offsets/*' >> logs/prune.log 2>&1

@@ -1,0 +1,70 @@
+<?xml version="1.0"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<configuration>
+
+  <!-- Metastore backing store: Postgres, so the catalogue survives restarts
+       (the bundled Derby is single-connection and would block HiveServer2 and
+       Spark from attaching at the same time). -->
+  <property>
+    <name>javax.jdo.option.ConnectionURL</name>
+    <value>jdbc:postgresql://hive-postgres:5432/metastore</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionDriverName</name>
+    <value>org.postgresql.Driver</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionUserName</name>
+    <value>hive</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionPassword</name>
+    <value>hive</value>
+  </property>
+
+  <property>
+    <name>hive.metastore.warehouse.dir</name>
+    <value>hdfs://namenode:8020/user/hive/warehouse</value>
+  </property>
+  <property>
+    <name>hive.metastore.uris</name>
+    <value>thrift://hive-metastore:9083</value>
+  </property>
+
+  <property>
+    <name>hive.server2.enable.doAs</name>
+    <value>false</value>
+  </property>
+  <property>
+    <name>hive.server2.thrift.bind.host</name>
+    <value>0.0.0.0</value>
+  </property>
+
+  <!-- The summary mart (spec 8.2) is written by INSERT OVERWRITE ... GROUP BY,
+       which Hive rejects unless dynamic partitioning is in nonstrict mode. -->
+  <property>
+    <name>hive.exec.dynamic.partition</name>
+    <value>true</value>
+  </property>
+  <property>
+    <name>hive.exec.dynamic.partition.mode</name>
+    <value>nonstrict</value>
+  </property>
+
+  <!-- Keep the mart as a plain managed table rather than a transactional one;
+       Spark cannot read Hive ACID tables. -->
+  <property>
+    <name>hive.create.as.insert.only</name>
+    <value>false</value>
+  </property>
+  <property>
+    <name>hive.default.fileformat.managed</name>
+    <value>parquet</value>
+  </property>
+
+  <property>
+    <name>hive.stats.autogather</name>
+    <value>true</value>
+  </property>
+
+</configuration>

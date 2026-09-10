@@ -1,0 +1,35 @@
+{
+  "name": "finsight-hdfs-sink",
+  "config": {
+    "connector.class": "io.confluent.connect.hdfs3.Hdfs3SinkConnector",
+    "tasks.max": "1",
+    "topics": "txn-raw",
+
+    "hdfs.url": "hdfs://namenode:8020",
+    "hadoop.conf.dir": "/etc/hadoop",
+    "topics.dir": "/finsight/raw",
+    "logs.dir": "/finsight/logs",
+
+    "format.class": "io.confluent.connect.hdfs3.parquet.ParquetFormat",
+    "partitioner.class": "io.confluent.connect.storage.partitioner.FieldPartitioner",
+    "partition.field.name": "step",
+
+    "flush.size": "500",
+    "rotate.interval.ms": "60000",
+
+    "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "true",
+
+    "_comment_router": "Connect writes to <topics.dir>/<topic>/, which would give /finsight/raw/txn-raw. The spec (6.3) requires /finsight/raw/transactions, so the topic name is rewritten for pathing purposes only.",
+    "transforms": "renameForPath",
+    "transforms.renameForPath.type": "org.apache.kafka.connect.transforms.RegexRouter",
+    "transforms.renameForPath.regex": "txn-raw",
+    "transforms.renameForPath.replacement": "transactions",
+
+    "_comment_license": "kafka-connect-hdfs3 is a Confluent proprietary connector. An empty confluent.license runs the 30-day evaluation. Use spark/hdfs_sink.py for an unrestricted alternative.",
+    "confluent.topic.bootstrap.servers": "kafka:29092",
+    "confluent.topic.replication.factor": "1",
+    "confluent.license": ""
+  }
+}
